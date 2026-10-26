@@ -6194,9 +6194,10 @@ class SqlAlchemyStore(
             stored_usage_nodes: defaultdict[str, list[SpanAggregationNode]] = defaultdict(list)
             stored_cost_nodes: defaultdict[str, list[SpanAggregationNode]] = defaultdict(list)
             if recompute_trace_ids:
+                # Span content can be large; avoid buffering the whole trace at once.
                 stored_span_rows = self._stored_span_rows_query(
                     session, sorted(recompute_trace_ids)
-                ).all()
+                ).yield_per(16)
                 for row_trace_id, row_span_id, row_parent_span_id, row_content in stored_span_rows:
                     # Phase 3 already upserted this batch's spans, so a span re-sent in this batch
                     # is read back here as well. Skip it, otherwise it would be counted twice: once

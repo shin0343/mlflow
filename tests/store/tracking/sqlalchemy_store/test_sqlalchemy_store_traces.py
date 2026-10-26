@@ -1,10 +1,12 @@
 import asyncio
 import contextlib
+import gc
 import json
 import random
 import re
 import threading
 import time
+import tracemalloc
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -5219,6 +5221,55 @@ def test_log_spans_token_usage_dedups_rollup_parent(store: SqlAlchemyStore) -> N
         "input_tokens": 120,
         "output_tokens": 15,
         "total_tokens": 135,
+    }
+
+
+def test_log_spans_recompute_does_not_buffer_all_span_content(
+    store: SqlAlchemyStore, record_property
+):
+    experiment_id = store.create_experiment("test_recompute_memory")
+    trace_id = f"tr-{uuid.uuid4().hex}"
+    payload_size = 256 * 1024
+    usage = {"input_tokens": 10, "output_tokens": 1, "total_tokens": 11}
+    store.log_spans(experiment_id, [create_test_span(trace_id, span_id=1, end_ns=None)])
+    store.log_spans(
+        experiment_id,
+        [
+            create_test_span(
+                trace_id,
+                span_id=i + 2,
+                parent_id=1,
+                attributes={
+                    SpanAttributeKey.INPUTS: "x" * payload_size,
+                    SpanAttributeKey.CHAT_USAGE: usage,
+                },
+            )
+            for i in range(96)
+        ],
+    )
+    new_span = create_test_span(
+        trace_id, span_id=100, parent_id=1, attributes={SpanAttributeKey.CHAT_USAGE: usage}
+    )
+    gc.collect()
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+        tracemalloc.start()
+    baseline, _ = tracemalloc.get_traced_memory()
+    tracemalloc.reset_peak()
+    try:
+        store.log_spans(experiment_id, [new_span])
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        if not was_tracing:
+            tracemalloc.stop()
+
+    peak -= baseline
+    record_property("recompute_peak_bytes", peak)
+    assert peak < 12 * 1024 * 1024
+    assert store.get_trace_info(trace_id).token_usage == {
+        "input_tokens": 970,
+        "output_tokens": 97,
+        "total_tokens": 1067,
     }
 
 
